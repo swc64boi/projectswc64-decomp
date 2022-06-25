@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "sm64.h"
+#include "prevent_bss_reordering.h"
 #include "audio/external.h"
 #include "game_init.h"
 #include "memory.h"
@@ -10,7 +11,7 @@
 #include "buffers/buffers.h"
 #include "segments.h"
 #include "main.h"
-#include "rumble_init.h"
+#include "thread6.h"
 
 // Message IDs
 #define MESG_SP_COMPLETE 100
@@ -24,21 +25,35 @@ OSThread gIdleThread;
 OSThread gMainThread;
 OSThread gGameLoopThread;
 OSThread gSoundThread;
+#ifdef VERSION_SH
+OSThread gRumblePakThread;
+
+s32 gRumblePakPfs; // Actually an OSPfs but we don't have that header yet
+#endif
 
 OSIoMesg gDmaIoMesg;
-OSMesg gMainReceivedMesg;
-
+OSMesg D_80339BEC;
 OSMesgQueue gDmaMesgQueue;
 OSMesgQueue gSIEventMesgQueue;
 OSMesgQueue gPIMesgQueue;
 OSMesgQueue gIntrMesgQueue;
 OSMesgQueue gSPTaskMesgQueue;
-
+#ifdef VERSION_SH
+OSMesgQueue gRumblePakSchedulerMesgQueue;
+OSMesgQueue gRumbleThreadVIMesgQueue;
+#endif
 OSMesg gDmaMesgBuf[1];
 OSMesg gPIMesgBuf[32];
 OSMesg gSIEventMesgBuf[1];
 OSMesg gIntrMesgBuf[16];
 OSMesg gUnknownMesgBuf[16];
+#ifdef VERSION_SH
+OSMesg gRumblePakSchedulerMesgBuf[1];
+OSMesg gRumbleThreadVIMesgBuf[1];
+
+struct RumbleData gRumbleDataQueue[3];
+struct StructSH8031D9B0 gCurrRumbleSettings;
+#endif
 
 struct VblankHandler *gVblankHandler1 = NULL;
 struct VblankHandler *gVblankHandler2 = NULL;
@@ -47,23 +62,22 @@ struct SPTask *sCurrentAudioSPTask = NULL;
 struct SPTask *sCurrentDisplaySPTask = NULL;
 struct SPTask *sNextAudioSPTask = NULL;
 struct SPTask *sNextDisplaySPTask = NULL;
-s8 sAudioEnabled = TRUE;
-u32 gNumVblanks = 0;
+s8 sAudioEnabled = 1;
+u32 sNumVblanks = 0;
 s8 gResetTimer = 0;
-s8 gNmiResetBarsTimer = 0;
-s8 gDebugLevelSelect = FALSE;
+s8 D_8032C648 = 0;
+s8 gDebugLevelSelect = 0;
 s8 D_8032C650 = 0;
 
 s8 gShowProfiler = FALSE;
 s8 gShowDebugText = FALSE;
 
+u16 sProfilerKeySequence[] = { U_JPAD, U_JPAD, D_JPAD, D_JPAD, L_JPAD, R_JPAD, L_JPAD, R_JPAD };
+
+u16 sDebugTextKeySequence[] = { D_JPAD, D_JPAD, U_JPAD, U_JPAD, L_JPAD, R_JPAD, L_JPAD, R_JPAD };
+
 // unused
 void handle_debug_key_sequences(void) {
-    static u16 sProfilerKeySequence[] = {
-        U_JPAD, U_JPAD, D_JPAD, D_JPAD, L_JPAD, R_JPAD, L_JPAD, R_JPAD
-    };
-    static u16 sDebugTextKeySequence[] = { D_JPAD, D_JPAD, U_JPAD, U_JPAD,
-                                           L_JPAD, R_JPAD, L_JPAD, R_JPAD };
     static s16 sProfilerKey = 0;
     static s16 sDebugTextKey = 0;
     if (gPlayer3Controller->buttonPressed != 0) {
@@ -89,10 +103,6 @@ void unknown_main_func(void) {
     // uninitialized
     OSTime time;
     u32 b;
-#ifdef AVOID_UB
-    time = 0;
-    b = 0;
-#endif
 
     osSetTime(time);
     osMapTLB(0, b, NULL, 0, 0, 0);
@@ -110,9 +120,6 @@ void stub_main_1(void) {
 void stub_main_2(void) {
 }
 
-void stub_main_3(void) {
-}
-
 void setup_mesg_queues(void) {
     osCreateMesgQueue(&gDmaMesgQueue, gDmaMesgBuf, ARRAY_COUNT(gDmaMesgBuf));
     osCreateMesgQueue(&gSIEventMesgQueue, gSIEventMesgBuf, ARRAY_COUNT(gSIEventMesgBuf));
@@ -124,7 +131,6 @@ void setup_mesg_queues(void) {
 
     osSetEventMesg(OS_EVENT_SP, &gIntrMesgQueue, (OSMesg) MESG_SP_COMPLETE);
     osSetEventMesg(OS_EVENT_DP, &gIntrMesgQueue, (OSMesg) MESG_DP_COMPLETE);
-    osSetEventMesg(OS_EVENT_PRENMI, &gIntrMesgQueue, (OSMesg) MESG_NMI_REQUEST);
 }
 
 void alloc_pool(void) {
@@ -142,19 +148,8 @@ void create_thread(OSThread *thread, OSId id, void (*entry)(void *), void *arg, 
 }
 
 #ifdef VERSION_SH
-extern void func_sh_802f69cc(void);
+extern void func_sh_802F69CC(void);
 #endif
-
-void handle_nmi_request(void) {
-    gResetTimer = 1;
-    gNmiResetBarsTimer = 0;
-    stop_sounds_in_continuous_banks();
-    sound_banks_disable(SEQ_PLAYER_SFX, SOUND_BANKS_BACKGROUND);
-    fadeout_music(90);
-#ifdef VERSION_SH
-    func_sh_802f69cc();
-#endif
-}
 
 void receive_new_tasks(void) {
     struct SPTask *spTask;
@@ -183,7 +178,7 @@ void receive_new_tasks(void) {
 }
 
 void start_sptask(s32 taskType) {
-    UNUSED u8 filler[4];
+    UNUSED s32 pad; // needed to pad the stack
 
     if (taskType == M_AUDTASK) {
         gActiveSPTask = sCurrentAudioSPTask;
@@ -218,24 +213,13 @@ void pretend_audio_sptask_done(void) {
 }
 
 void handle_vblank(void) {
-    UNUSED u8 filler[4];
+    UNUSED s32 pad; // needed to pad the stack
 
-    stub_main_3();
-    gNumVblanks++;
-#ifdef VERSION_SH
-    if (gResetTimer > 0 && gResetTimer < 100) {
-        gResetTimer++;
-    }
-#else
-    if (gResetTimer > 0) {
-        gResetTimer++;
-    }
-#endif
-
+    sNumVblanks++;
     receive_new_tasks();
 
     // First try to kick off an audio task. If the gfx task is currently
-    // running, we need to asynchronously interrupt it -- handle_sp_complete
+    // running, we need to asychronously interrupt it -- handle_sp_complete
     // will pick up on what we're doing and start the audio task for us.
     // If there is already an audio task running, there is nothing to do.
     // If there is no audio task available, try a gfx task instead.
@@ -244,7 +228,7 @@ void handle_vblank(void) {
             interrupt_gfx_sptask();
         } else {
             profiler_log_vblank_time();
-            if (sAudioEnabled) {
+            if (sAudioEnabled != 0) {
                 start_sptask(M_AUDTASK);
             } else {
                 pretend_audio_sptask_done();
@@ -257,7 +241,7 @@ void handle_vblank(void) {
             start_sptask(M_GFXTASK);
         }
     }
-#if ENABLE_RUMBLE
+#ifdef VERSION_SH
     rumble_thread_update_vi();
 #endif
 
@@ -288,7 +272,7 @@ void handle_sp_complete(void) {
 
         // Start the audio task, as expected by handle_vblank.
         profiler_log_vblank_time();
-        if (sAudioEnabled) {
+        if (sAudioEnabled != 0) {
             start_sptask(M_AUDTASK);
         } else {
             pretend_audio_sptask_done();
@@ -339,7 +323,7 @@ void thread3_main(UNUSED void *arg) {
     create_thread(&gGameLoopThread, 5, thread5_game_loop, NULL, gThread5Stack + 0x2000, 10);
     osStartThread(&gGameLoopThread);
 
-    while (TRUE) {
+    while (1) {
         OSMesg msg;
 
         osRecvMesg(&gIntrMesgQueue, &msg, OS_MESG_BLOCK);
@@ -355,9 +339,6 @@ void thread3_main(UNUSED void *arg) {
                 break;
             case MESG_START_GFX_SPTASK:
                 start_gfx_sptask();
-                break;
-            case MESG_NMI_REQUEST:
-                handle_nmi_request();
                 break;
         }
         stub_main_2();
@@ -384,13 +365,13 @@ void send_sp_task_message(OSMesg *msg) {
 }
 
 void dispatch_audio_sptask(struct SPTask *spTask) {
-    if (sAudioEnabled && spTask != NULL) {
+    if (sAudioEnabled != 0 && spTask != NULL) {
         osWritebackDCacheAll();
         osSendMesg(&gSPTaskMesgQueue, spTask, OS_MESG_NOBLOCK);
     }
 }
 
-void exec_display_list(struct SPTask *spTask) {
+void send_display_list(struct SPTask *spTask) {
     if (spTask != NULL) {
         osWritebackDCacheAll();
         spTask->state = SPTASK_STATE_NOT_STARTED;
@@ -405,15 +386,18 @@ void exec_display_list(struct SPTask *spTask) {
 }
 
 void turn_on_audio(void) {
-    sAudioEnabled = TRUE;
+    sAudioEnabled = 1;
 }
 
 void turn_off_audio(void) {
-    sAudioEnabled = FALSE;
+    sAudioEnabled = 0;
     while (sCurrentAudioSPTask != NULL) {
         ;
     }
 }
+
+/* Crash Screen */
+extern void crash_screen_init(void);
 
 /**
  * Initialize hardware, start main thread, then idle.
@@ -439,6 +423,10 @@ void thread1_idle(UNUSED void *arg) {
     osViSetSpecialFeatures(OS_VI_DITHER_FILTER_ON);
     osViSetSpecialFeatures(OS_VI_GAMMA_OFF);
     osCreatePiManager(OS_PRIORITY_PIMGR, &gPIMesgQueue, gPIMesgBuf, ARRAY_COUNT(gPIMesgBuf));
+
+    /* Crash Screen */
+    crash_screen_init();
+
     create_thread(&gMainThread, 3, thread3_main, NULL, gThread3Stack + 0x2000, 100);
     if (D_8032C650 == 0) {
         osStartThread(&gMainThread);
@@ -446,13 +434,13 @@ void thread1_idle(UNUSED void *arg) {
     osSetThreadPri(NULL, 0);
 
     // halt
-    while (TRUE) {
+    while (1) {
         ;
     }
 }
 
 void main_func(void) {
-    UNUSED u8 filler[64];
+    UNUSED u8 pad[64]; // needed to pad the stack
 
     osInitialize();
     stub_main_1();

@@ -1,4 +1,4 @@
-#include <PR/ultratypes.h>
+#include <ultra64.h>
 
 #include "sm64.h"
 #include "behavior_data.h"
@@ -15,15 +15,15 @@
 #include "interaction.h"
 #include "camera.h"
 #include "level_table.h"
-#include "rumble_init.h"
+#include "thread6.h"
 
-#define POLE_NONE          0
+#define POLE_NONE 0
 #define POLE_TOUCHED_FLOOR 1
-#define POLE_FELL_OFF      2
+#define POLE_FELL_OFF 2
 
-#define HANG_NONE            0
+#define HANG_NONE 0
 #define HANG_HIT_CEIL_OR_OOB 1
-#define HANG_LEFT_CEIL       2
+#define HANG_LEFT_CEIL 2
 
 void add_tree_leaf_particles(struct MarioState *m) {
     f32 leafHeight;
@@ -56,7 +56,9 @@ void play_climbing_sounds(struct MarioState *m, s32 b) {
 }
 
 s32 set_pole_position(struct MarioState *m, f32 offsetY) {
-    UNUSED u8 filler[12];
+    UNUSED s32 unused1;
+    UNUSED s32 unused2;
+    UNUSED s32 unused3;
     struct Surface *floor;
     struct Surface *ceil;
     f32 floorHeight;
@@ -141,7 +143,7 @@ s32 act_holding_pole(struct MarioState *m) {
 
     if (m->controller->stickY > 16.0f) {
         f32 poleTop = m->usedObj->hitboxHeight - 100.0f;
-        const BehaviorScript *poleBehavior = virtual_to_segmented(0x13, m->usedObj->behavior);
+        void *poleBehavior = virtual_to_segmented(0x13, m->usedObj->behavior);
 
         if (marioObj->oMarioPolePos < poleTop - 0.4f) {
             return set_mario_action(m, ACT_CLIMBING_POLE, 0);
@@ -169,10 +171,10 @@ s32 act_holding_pole(struct MarioState *m) {
             }
         }
         play_climbing_sounds(m, 2);
-#if ENABLE_RUMBLE
+#ifdef VERSION_SH
         reset_rumble_timers();
 #endif
-        set_sound_moving_speed(SOUND_BANK_MOVING, marioObj->oMarioPoleYawVel / 0x100 * 2);
+        func_80320A4C(1, marioObj->oMarioPoleYawVel / 0x100 * 2);
     } else {
         marioObj->oMarioPoleYawVel = 0;
         m->faceAngle[1] -= m->controller->stickX * 16.0f;
@@ -248,7 +250,7 @@ s32 act_grab_pole_fast(struct MarioState *m) {
             set_mario_animation(m, MARIO_ANIM_GRAB_POLE_SWING_PART1);
         } else {
             set_mario_animation(m, MARIO_ANIM_GRAB_POLE_SWING_PART2);
-            if (is_anim_at_end(m)) {
+            if (is_anim_at_end(m) != 0) {
                 marioObj->oMarioPoleYawVel = 0;
                 set_mario_action(m, ACT_HOLDING_POLE, 0);
             }
@@ -270,7 +272,7 @@ s32 act_top_of_pole_transition(struct MarioState *m) {
         }
     } else {
         set_mario_animation(m, MARIO_ANIM_RETURN_FROM_HANDSTAND);
-        if (m->marioObj->header.gfx.animInfo.animFrame == 0) {
+        if (m->marioObj->header.gfx.unk38.animFrame == 0) {
             return set_mario_action(m, ACT_HOLDING_POLE, 0);
         }
     }
@@ -297,7 +299,7 @@ s32 act_top_of_pole(struct MarioState *m) {
 }
 
 s32 perform_hanging_step(struct MarioState *m, Vec3f nextPos) {
-    UNUSED u8 filler[4];
+    UNUSED s32 unused;
     struct Surface *ceil;
     struct Surface *floor;
     f32 ceilHeight;
@@ -383,7 +385,7 @@ void update_hang_stationary(struct MarioState *m) {
 }
 
 s32 act_start_hanging(struct MarioState *m) {
-#if ENABLE_RUMBLE
+#ifdef VERSION_SH
     if (m->actionTimer++ == 0) {
         queue_rumble_data(5, 80);
     }
@@ -403,7 +405,7 @@ s32 act_start_hanging(struct MarioState *m) {
         return set_mario_action(m, ACT_GROUND_POUND, 0);
     }
 
-    //! Crash if Mario's referenced ceiling is NULL (same for other hanging actions)
+    //! Crash if mario's referenced ceiling is NULL (same for other hanging actions)
     if (m->ceil->type != SURFACE_HANGABLE) {
         return set_mario_action(m, ACT_FREEFALL, 0);
     }
@@ -466,10 +468,10 @@ s32 act_hang_moving(struct MarioState *m) {
         set_mario_animation(m, MARIO_ANIM_MOVE_ON_WIRE_NET_LEFT);
     }
 
-    if (m->marioObj->header.gfx.animInfo.animFrame == 12) {
+    if (m->marioObj->header.gfx.unk38.animFrame == 12) {
         play_sound(SOUND_ACTION_HANGING_STEP, m->marioObj->header.gfx.cameraToObject);
-#if ENABLE_RUMBLE
-        queue_rumble_data(1, 30);
+#ifdef VERSION_SH
+        queue_rumble_data(5, 30);
 #endif
     }
 
@@ -492,9 +494,10 @@ s32 let_go_of_ledge(struct MarioState *m) {
     struct Surface *floor;
 
     m->vel[1] = 0.0f;
-    m->forwardVel = -8.0f;
+    m->forwardVel = 8.0f;
     m->pos[0] -= 60.0f * sins(m->faceAngle[1]);
     m->pos[2] -= 60.0f * coss(m->faceAngle[1]);
+    m->faceAngle[1] += 0x8000;
 
     floorHeight = find_floor(m->pos[0], m->pos[1], m->pos[2], &floor);
     if (floorHeight < m->pos[1] - 100.0f) {
@@ -561,14 +564,14 @@ s32 act_ledge_grab(struct MarioState *m) {
         return set_mario_action(m, ACT_LEDGE_CLIMB_FAST, 0);
     }
 
-    if (m->input & INPUT_STOMPED) {
-        if (m->marioObj->oInteractStatus & INT_STATUS_MARIO_KNOCKBACK_DMG) {
+    if (m->input & INPUT_UNKNOWN_10) {
+        if (m->marioObj->oInteractStatus & INT_STATUS_MARIO_UNK1) {
             m->hurtCounter += (m->flags & MARIO_CAP_ON_HEAD) ? 12 : 18;
         }
         return let_go_of_ledge(m);
     }
 #ifdef VERSION_EU
-    // On EU, you can't slow climb up ledges while holding A.
+    // On PAL, you can't slow climb up ledges while holding A.
     if (m->actionTimer == 10 && (m->input & INPUT_NONZERO_ANALOG) && !(m->input & INPUT_A_DOWN))
 #else
     if (m->actionTimer == 10 && (m->input & INPUT_NONZERO_ANALOG))
@@ -610,14 +613,14 @@ s32 act_ledge_climb_slow(struct MarioState *m) {
         return check_common_action_exits(m);
     }
 
-    if (m->actionTimer == 10) {
+    if (m->actionTimer == 0) {
         play_sound_if_no_flag(m, SOUND_MARIO_EEUH, MARIO_MARIO_SOUND_PLAYED);
     }
 
     update_ledge_climb(m, MARIO_ANIM_SLOW_LEDGE_GRAB, ACT_IDLE);
 
     update_ledge_climb_camera(m);
-    if (m->marioObj->header.gfx.animInfo.animFrame == 17) {
+    if (m->marioObj->header.gfx.unk38.animFrame == 17) {
         m->action = ACT_LEDGE_CLIMB_SLOW_2;
     }
 
@@ -646,7 +649,7 @@ s32 act_ledge_climb_fast(struct MarioState *m) {
 
     update_ledge_climb(m, MARIO_ANIM_FAST_LEDGE_GRAB, ACT_IDLE);
 
-    if (m->marioObj->header.gfx.animInfo.animFrame == 8) {
+    if (m->marioObj->header.gfx.unk38.animFrame == 8) {
         play_mario_landing_sound(m, SOUND_ACTION_TERRAIN_LANDING);
     }
     update_ledge_climb_camera(m);
@@ -660,7 +663,7 @@ s32 act_grabbed(struct MarioState *m) {
 
         m->faceAngle[1] = m->usedObj->oMoveAngleYaw;
         vec3f_copy(m->pos, m->marioObj->header.gfx.pos);
-#if ENABLE_RUMBLE
+#ifdef VERSION_SH
         queue_rumble_data(5, 60);
 #endif
 
@@ -730,28 +733,27 @@ s32 act_in_cannon(struct MarioState *m) {
             if (m->input & INPUT_A_PRESSED) {
                 m->forwardVel = 100.0f * coss(m->faceAngle[0]);
 
-                m->vel[1] = 100.0f * sins(m->faceAngle[0]);
+                m->vel[1] = 120.0f * sins(m->faceAngle[0]);
 
                 m->pos[0] += 120.0f * coss(m->faceAngle[0]) * sins(m->faceAngle[1]);
                 m->pos[1] += 120.0f * sins(m->faceAngle[0]);
                 m->pos[2] += 120.0f * coss(m->faceAngle[0]) * coss(m->faceAngle[1]);
 
-                play_sound(SOUND_ACTION_FLYING_FAST, m->marioObj->header.gfx.cameraToObject);
-                play_sound(SOUND_OBJ_POUNDING_CANNON, m->marioObj->header.gfx.cameraToObject);
-
                 m->marioObj->header.gfx.node.flags |= GRAPH_RENDER_ACTIVE;
 
                 set_mario_action(m, ACT_SHOT_FROM_CANNON, 0);
-#if ENABLE_RUMBLE
+#ifdef VERSION_SH
                 queue_rumble_data(60, 70);
 #endif
                 m->usedObj->oAction = 2;
                 return FALSE;
-            } else if (m->faceAngle[0] != startFacePitch || m->faceAngle[1] != startFaceYaw) {
-                play_sound(SOUND_MOVING_AIM_CANNON, m->marioObj->header.gfx.cameraToObject);
-#if ENABLE_RUMBLE
-                reset_rumble_timers_2(0);
+            } else {
+                if (m->faceAngle[0] != startFacePitch || m->faceAngle[1] != startFaceYaw) {
+                    play_sound(SOUND_MOVING_AIM_CANNON, m->marioObj->header.gfx.cameraToObject);
+#ifdef VERSION_SH
+                    reset_rumble_timers_2(0);
 #endif
+                }
             }
     }
 
@@ -836,7 +838,7 @@ s32 act_tornado_twirling(struct MarioState *m) {
 
     vec3f_copy(m->marioObj->header.gfx.pos, m->pos);
     vec3s_set(m->marioObj->header.gfx.angle, 0, m->faceAngle[1] + m->twirlYaw, 0);
-#if ENABLE_RUMBLE
+#ifdef VERSION_SH
     reset_rumble_timers();
 #endif
 
