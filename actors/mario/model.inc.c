@@ -31,8 +31,8 @@
 /********************************************************************************/
 
 static Lights1	light_mario[] = {
-	ShapeColor_mario(  0,   0, 255),
-	ShapeColor_mario(255,   0,   0),
+	ShapeColor_mario(  0,  63, 255),
+	ShapeColor_mario(255,  31,   0),
 	ShapeColor_mario(255, 255, 255),
 	ShapeColor_mario(114,  28,  14),
 	ShapeColor_mario(254, 193, 121),
